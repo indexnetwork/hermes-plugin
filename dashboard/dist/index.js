@@ -18,6 +18,28 @@
   // window.__HERMES_PLUGINS__.register. When absent we are in the web
   // dashboard host and behave exactly as before.
   const DESKTOP_ENV = window.__INDEX_NETWORK_DESKTOP_ENV__ || null;
+
+  // Desktop persists through ctx.storage, set on DESKTOP_ENV before render.
+  // Without that env, values stay in the host page's own storage.
+  function storageSet(key, value) {
+    const storage = DESKTOP_ENV && DESKTOP_ENV.storage;
+    if (storage && typeof storage.set === "function") {
+      storage.set(key, value);
+      return;
+    }
+    try { window.localStorage.setItem(key, typeof value === "string" ? value : JSON.stringify(value)); }
+    catch (e) { /* noop */ }
+  }
+
+  function readJsonStorage(key) {
+    const storage = DESKTOP_ENV && DESKTOP_ENV.storage;
+    if (storage && typeof storage.get === "function") {
+      const value = storage.get(key, {});
+      return value && typeof value === "object" ? value : {};
+    }
+    try { return JSON.parse(window.localStorage.getItem(key) || "{}") || {}; }
+    catch (e) { return {}; }
+  }
   const SDK = DESKTOP_ENV ? DESKTOP_ENV.sdk : window.__HERMES_PLUGIN_SDK__;
   if (!SDK || !SDK.React || (!DESKTOP_ENV && !window.__HERMES_PLUGINS__)) {
     console.warn("[index-network] Hermes dashboard plugin SDK is unavailable.");
@@ -804,7 +826,7 @@
 
   function rememberPagePath(path) {
     try {
-      if (path && path.split("?")[0] === PAGE_PATH) window.localStorage.setItem(LAST_PATH_KEY, path);
+      if (path && path.split("?")[0] === PAGE_PATH) storageSet(LAST_PATH_KEY, path);
     } catch (e) { /* noop */ }
   }
 
@@ -4955,8 +4977,7 @@
     const query = queryState[0];
     const setQuery = queryState[1];
     const readState = useState(function () {
-      try { return JSON.parse(window.localStorage.getItem("index_msg_read") || "{}") || {}; }
-      catch (e) { return {}; }
+      return readJsonStorage("index_msg_read");
     });
     const readMap = readState[0];
     const setReadMap = readState[1];
@@ -4972,7 +4993,7 @@
         if ((prev[id] || "") >= stamp) return prev;
         const next = Object.assign({}, prev);
         next[id] = stamp;
-        try { window.localStorage.setItem("index_msg_read", JSON.stringify(next)); } catch (e) { /* noop */ }
+        storageSet("index_msg_read", next);
         return next;
       });
     }
@@ -5371,9 +5392,6 @@
     const unreadState = useState(false);
     const hasUnread = unreadState[0];
     const setHasUnread = unreadState[1];
-    const inlineHdrState = useState(false);
-    const inlineHdr = inlineHdrState[0];
-    const setInlineHdr = inlineHdrState[1];
     // Auth gate: "checking" until /auth/status resolves, then "needsLogin"
     // (browser sign-in) or "authed" (load the dashboard).
     const authState = useState("checking");
@@ -5383,7 +5401,6 @@
     const loadIntentDetailRef = useRef(null);
     const selectedIdRef = useRef(selectedId);
     selectedIdRef.current = selectedId;
-    const headerCtlRef = useRef(null);
     const toggleProfileRef = useRef(null);
     const openMessagesRef = useRef(null);
     const focusAppliedRef = useRef(null);
@@ -5481,8 +5498,7 @@
       fetchPluginJSON(API + "/conversations")
         .then(function (payload) {
           const convs = (payload && payload.conversations) || [];
-          let readMap = {};
-          try { readMap = JSON.parse(window.localStorage.getItem("index_msg_read") || "{}") || {}; } catch (e) { readMap = {}; }
+          const readMap = readJsonStorage("index_msg_read");
           const unread = convs.some(function (c) {
             return !!c.lastMessageAt && c.lastMessageAt > (readMap[c.id] || "");
           });
@@ -5502,12 +5518,6 @@
     useEffect(function () {
       if (auth === "authed" && !messagesOpen) refreshUnread();
     }, [messagesOpen, auth]);
-
-    useEffect(function () {
-      const ctl = headerCtlRef.current;
-      if (!ctl || !ctl.messages) return;
-      ctl.messages.classList.toggle("index-dashboard__hdr-account--dot", !!hasUnread);
-    }, [hasUnread]);
 
     // Open (or resolve) the in-dashboard DM for an opportunity via the same
     // start-chat endpoint the Mac app uses; the backend resolves the counterpart.
@@ -5773,94 +5783,6 @@
     }, [auth, selectedId]);
 
     useEffect(function () {
-      const header = document.querySelector('header[role="banner"]');
-      if (!header) {
-        setInlineHdr(true);
-        return undefined;
-      }
-      const container = header.querySelector("div") || header;
-
-      const wrap = document.createElement("div");
-      wrap.className = "index-dashboard__hdr";
-
-      const label = document.createElement("span");
-      label.className = "index-dashboard__hdr-label";
-      label.textContent = "AUTO-REFRESH";
-
-      const sw = document.createElement("button");
-      sw.type = "button";
-      sw.className = "index-dashboard__switch";
-      sw.setAttribute("role", "switch");
-      sw.setAttribute("aria-label", "Auto-refresh");
-      sw.appendChild(document.createElement("span")).className = "index-dashboard__switch-knob";
-      const onToggle = function () {
-        setAutoRefresh(function (v) { return !v; });
-      };
-      sw.addEventListener("click", onToggle);
-
-      const refresh = document.createElement("button");
-      refresh.type = "button";
-      refresh.className = "index-dashboard__header-refresh";
-      refresh.setAttribute("aria-label", "Refresh");
-      refresh.title = "Refresh";
-      refresh.innerHTML = REFRESH_ICON_SVG;
-      const onRefresh = function () {
-        if (loadRef.current) loadRef.current();
-      };
-      refresh.addEventListener("click", onRefresh);
-
-      const messages = document.createElement("button");
-      messages.type = "button";
-      messages.className = "index-dashboard__hdr-account";
-      messages.setAttribute("aria-label", "Messages");
-      messages.title = "Messages";
-      messages.innerHTML = MESSAGES_ICON_SVG;
-      const onMessages = function () {
-        if (openMessagesRef.current) openMessagesRef.current(null);
-      };
-      messages.addEventListener("click", onMessages);
-
-      const account = document.createElement("button");
-      account.type = "button";
-      account.className = "index-dashboard__hdr-account";
-      account.setAttribute("aria-label", "Profile & settings");
-      account.title = "Profile & settings";
-      account.innerHTML = ACCOUNT_ICON_SVG;
-      const onAccount = function () {
-        if (toggleProfileRef.current) toggleProfileRef.current();
-      };
-      account.addEventListener("click", onAccount);
-
-      wrap.appendChild(label);
-      wrap.appendChild(sw);
-      wrap.appendChild(refresh);
-      wrap.appendChild(messages);
-      wrap.appendChild(account);
-      container.appendChild(wrap);
-      headerCtlRef.current = { sw: sw, refresh: refresh, account: account, messages: messages };
-
-      return function () {
-        sw.removeEventListener("click", onToggle);
-        refresh.removeEventListener("click", onRefresh);
-        messages.removeEventListener("click", onMessages);
-        account.removeEventListener("click", onAccount);
-        wrap.remove();
-        headerCtlRef.current = null;
-      };
-    }, []);
-
-    useEffect(function () {
-      const ctl = headerCtlRef.current;
-      if (!ctl) return;
-      ctl.sw.setAttribute("aria-checked", autoRefresh ? "true" : "false");
-      ctl.sw.classList.toggle("index-dashboard__switch--on", autoRefresh);
-      ctl.refresh.style.display = autoRefresh ? "none" : "inline-flex";
-      ctl.refresh.disabled = loading;
-      if (loading) ctl.refresh.setAttribute("data-busy", "true");
-      else ctl.refresh.removeAttribute("data-busy");
-    }, [autoRefresh, loading]);
-
-    useEffect(function () {
       // Only poll once signed in: firing bootstrap while the login gate (or the
       // initial auth check) is showing produces 401s that can land after the
       // login transition and clobber the fresh state, forcing a manual reload.
@@ -6047,8 +5969,7 @@
       );
 
     return React.createElement("div", { className: "index-dashboard", ref: rootRef, "data-scheme": scheme },
-      inlineHdr
-        ? React.createElement(InlineHeaderControls, {
+      React.createElement(InlineHeaderControls, {
           autoRefresh: autoRefresh,
           loading: loading,
           hasUnread: hasUnread,
@@ -6056,8 +5977,7 @@
           onRefresh: function () { if (loadRef.current) loadRef.current(); },
           onMessages: function () { if (openMessagesRef.current) openMessagesRef.current(null); },
           onAccount: function () { if (toggleProfileRef.current) toggleProfileRef.current(); },
-        })
-        : null,
+        }),
       negotiation
         ? React.createElement(NegotiationModal, {
           opportunity: negotiation,
