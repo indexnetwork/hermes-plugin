@@ -624,8 +624,8 @@
     return React.createElement("span", { key: key, className: "index-dashboard__tip", "data-tip": label }, child);
   }
 
-  // React twin of the DOM controls injected into the web dashboard's banner
-  // header — rendered inline when no such header exists (desktop host).
+  // Desktop renders this header inside the page. The web dashboard uses the
+  // header-right slot instead of the host banner.
   function headerIcon(paths) {
     return React.createElement("svg", {
       xmlns: "http://www.w3.org/2000/svg", width: 20, height: 20, viewBox: "0 0 24 24",
@@ -900,9 +900,9 @@
     return params;
   }
 
-  // HashRouter commits with history.pushState / replaceState. Those do not
-  // fire hashchange, so a deep link onto an already-open Discover page never
-  // reached the view. One watch turns every URL write into one event.
+  // hashchange and popstate retarget an open Discover page. This plugin does
+  // not wrap history.pushState or replaceState. Our own navigations dispatch
+  // LOCATION_EVENT.
   const LOCATION_EVENT = "index-network-location";
   if (!window.__indexNetworkLocationWatch) {
     window.__indexNetworkLocationWatch = true;
@@ -911,25 +911,23 @@
     };
     window.addEventListener("hashchange", emitLocation);
     window.addEventListener("popstate", emitLocation);
-    const pushState = history.pushState;
-    const replaceState = history.replaceState;
-    history.pushState = function () {
-      const before = window.location.href;
-      const result = pushState.apply(this, arguments);
-      if (window.location.href !== before) emitLocation();
-      return result;
-    };
-    history.replaceState = function () {
-      const before = window.location.href;
-      const result = replaceState.apply(this, arguments);
-      if (window.location.href !== before) emitLocation();
-      return result;
-    };
   }
 
   function onLocation(handler) {
     window.addEventListener(LOCATION_EVENT, handler);
     return function () { window.removeEventListener(LOCATION_EVENT, handler); };
+  }
+
+  function openIndexQuery(kind) {
+    const path = (window.location.pathname || "").split("?")[0];
+    const onPage = path === PAGE_PATH || path.indexOf(PAGE_PATH + "/") === 0;
+    if (onPage) {
+      window.dispatchEvent(new Event(kind === "chat" ? "index-network-open-messages" : "index-network-toggle-profile"));
+      return;
+    }
+    const target = PAGE_PATH + "?" + (kind === "chat" ? "chat" : "profile=1");
+    window.history.pushState(null, "", target);
+    window.dispatchEvent(new PopStateEvent("popstate"));
   }
 
   function parseView() {
@@ -4946,7 +4944,7 @@
             ["opportunity", "an opportunity surfaces", "your agent found someone who meets your signals and wants you to review."],
             ["accepted", "an intro is accepted", "both of you said yes, and the chat opens on both sides."],
             ["messages", "a message arrives", "a connection wrote to you."],
-            ["morningBrief", "daily brief", "your agent looks again at 08:00, and speaks only when it has something new."],
+            ["morningBrief", "daily brief", "off until you turn it on. At 08:00 your agent wakes once per active networked intent."],
           ].map(function (row) {
             const key = row[0];
             return React.createElement("label", { key: key, className: "index-dashboard__profile-check" },
@@ -5614,9 +5612,7 @@
     const unreadState = useState(false);
     const hasUnread = unreadState[0];
     const setHasUnread = unreadState[1];
-    const inlineHdrState = useState(false);
-    const inlineHdr = inlineHdrState[0];
-    const setInlineHdr = inlineHdrState[1];
+    const inlineHdr = !!DESKTOP_ENV;
     // Auth gate: "checking" until /auth/status resolves, then "needsLogin"
     // (browser sign-in) or "authed" (load the dashboard).
     const authState = useState("checking");
@@ -5626,7 +5622,6 @@
     const loadIntentDetailRef = useRef(null);
     const selectedIdRef = useRef(selectedId);
     selectedIdRef.current = selectedId;
-    const headerCtlRef = useRef(null);
     const toggleProfileRef = useRef(null);
     const openMessagesRef = useRef(null);
     const focusAppliedRef = useRef(null);
@@ -5762,10 +5757,25 @@
     }, [messagesOpen, auth]);
 
     useEffect(function () {
-      const ctl = headerCtlRef.current;
-      if (!ctl || !ctl.messages) return;
-      ctl.messages.classList.toggle("index-dashboard__hdr-account--dot", !!hasUnread);
-    }, [hasUnread]);
+      if (inlineHdr) return undefined;
+      window.dispatchEvent(new CustomEvent("index-network-unread", { detail: !!hasUnread }));
+      return undefined;
+    }, [hasUnread, inlineHdr]);
+
+    useEffect(function () {
+      function onToggleProfile() {
+        if (toggleProfileRef.current) toggleProfileRef.current();
+      }
+      function onOpenMessages() {
+        if (openMessagesRef.current) openMessagesRef.current(null);
+      }
+      window.addEventListener("index-network-toggle-profile", onToggleProfile);
+      window.addEventListener("index-network-open-messages", onOpenMessages);
+      return function () {
+        window.removeEventListener("index-network-toggle-profile", onToggleProfile);
+        window.removeEventListener("index-network-open-messages", onOpenMessages);
+      };
+    }, []);
 
     // Open (or resolve) the in-dashboard DM for an opportunity via the same
     // start-chat endpoint the Mac app uses; the backend resolves the counterpart.
@@ -6036,52 +6046,6 @@
     }, [auth, selectedId]);
 
     useEffect(function () {
-      const header = document.querySelector('header[role="banner"]');
-      if (!header) {
-        setInlineHdr(true);
-        return undefined;
-      }
-      const container = header.querySelector("div") || header;
-
-      const wrap = document.createElement("div");
-      wrap.className = "index-dashboard__hdr";
-
-      const messages = document.createElement("button");
-      messages.type = "button";
-      messages.className = "index-dashboard__hdr-account";
-      messages.setAttribute("aria-label", "Messages");
-      messages.title = "Messages";
-      messages.innerHTML = MESSAGES_ICON_SVG;
-      const onMessages = function () {
-        if (openMessagesRef.current) openMessagesRef.current(null);
-      };
-      messages.addEventListener("click", onMessages);
-
-      const account = document.createElement("button");
-      account.type = "button";
-      account.className = "index-dashboard__hdr-account";
-      account.setAttribute("aria-label", "Profile & settings");
-      account.title = "Profile & settings";
-      account.innerHTML = ACCOUNT_ICON_SVG;
-      const onAccount = function () {
-        if (toggleProfileRef.current) toggleProfileRef.current();
-      };
-      account.addEventListener("click", onAccount);
-
-      wrap.appendChild(messages);
-      wrap.appendChild(account);
-      container.appendChild(wrap);
-      headerCtlRef.current = { account: account, messages: messages };
-
-      return function () {
-        messages.removeEventListener("click", onMessages);
-        account.removeEventListener("click", onAccount);
-        wrap.remove();
-        headerCtlRef.current = null;
-      };
-    }, []);
-
-    useEffect(function () {
       // Only poll once signed in: firing bootstrap while the login gate (or the
       // initial auth check) is showing produces 401s that can land after the
       // login transition and clobber the fresh state, forcing a manual reload.
@@ -6328,6 +6292,29 @@
     );
   }
 
+  function IndexHeaderSlot() {
+    const unreadState = React.useState(false);
+    React.useEffect(function () {
+      function onUnread(event) { unreadState[1](!!(event && event.detail)); }
+      window.addEventListener("index-network-unread", onUnread);
+      return function () { window.removeEventListener("index-network-unread", onUnread); };
+    }, []);
+    function button(label, svg, kind, dot) {
+      return React.createElement("button", {
+        type: "button",
+        className: "index-dashboard__hdr-account" + (dot ? " index-dashboard__hdr-account--dot" : ""),
+        "aria-label": label,
+        title: label,
+        onClick: function () { openIndexQuery(kind); },
+        dangerouslySetInnerHTML: { __html: svg },
+      });
+    }
+    return React.createElement("div", { className: "index-dashboard__hdr" },
+      button("Messages", MESSAGES_ICON_SVG, "chat", unreadState[0]),
+      button("Profile & settings", ACCOUNT_ICON_SVG, "profile", false),
+    );
+  }
+
   if (DESKTOP_ENV) {
     // The separately installed Desktop copy is gated by register(ctx), which
     // removes it in restricted mode. Preserve its synchronous component seam.
@@ -6341,6 +6328,7 @@
       .then(function (payload) {
         if (!payload || payload.success !== true || payload.mode !== "full") return;
         window.__HERMES_PLUGINS__.register("index-network", IndexNetworkDashboard);
+        window.__HERMES_PLUGINS__.registerSlot("index-network", "header-right", IndexHeaderSlot);
       })
       .catch(function () { /* Restricted mode or unavailable backend: stay inert. */ });
   }
